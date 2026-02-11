@@ -7,6 +7,7 @@ import urllib.request
 import cv2
 import numpy as np
 import mediapipe as mp
+import pyautogui  # <-- NEW: Added PyAutoGUI
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
@@ -15,6 +16,9 @@ from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QVBoxLayout, QWidget, QMainWindow
 )
+
+# Safety feature: Prevents the script from crashing if the mouse hits the edge of the screen
+pyautogui.FAILSAFE = False
 
 # -------- Auto-Download the MediaPipe Model --------
 MODEL_PATH = 'hand_landmarker.task'
@@ -34,11 +38,10 @@ class VideoThread(QThread):
         self.running = False
         self.cap = None
         
-        # Initialize Modern MediaPipe Tasks API - Using VIDEO mode to prevent crashes
         base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
-            running_mode=vision.RunningMode.VIDEO,  # Fixes the silent crash
+            running_mode=vision.RunningMode.VIDEO,
             num_hands=1,
             min_hand_detection_confidence=0.5,
             min_hand_presence_confidence=0.5,
@@ -47,12 +50,12 @@ class VideoThread(QThread):
         self.detector = vision.HandLandmarker.create_from_options(options)
         
         self.last_click_time = 0
-        self.smoothing = 0.5
+        self.smoothing = 0.7  # Increased smoothing for a steadier system mouse
         self.pinch_threshold = 0.05
-        self.click_cooldown = 0.4
+        self.click_cooldown = 0.5
         self.last_index = None
         self.last_thumb = None
-        self.timestamp_ms = 0  # Required for VIDEO mode
+        self.timestamp_ms = 0
 
     def run(self):
         self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
@@ -69,7 +72,6 @@ class VideoThread(QThread):
                 h, w, _ = frame.shape
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 
-                # Ensure memory is contiguous for MediaPipe C++ backend
                 rgb = np.ascontiguousarray(rgb)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
@@ -77,30 +79,26 @@ class VideoThread(QThread):
                 thumb_coords = None
 
                 try:
-                    # Video mode requires strictly increasing timestamps
                     self.timestamp_ms += 33 
                     detection_result = self.detector.detect_for_video(mp_image, self.timestamp_ms)
                     
                     if detection_result.hand_landmarks:
                         hand = detection_result.hand_landmarks[0]
-                        # Landmark 8 is Index tip, 4 is Thumb tip
                         lm_index = hand[8]
                         lm_thumb = hand[4]
 
                         index_coords = (lm_index.x, lm_index.y)
                         thumb_coords = (lm_thumb.x, lm_thumb.y)
 
-                        # Draw landmarks
                         for lm in hand:
                             cx, cy = int(lm.x * w), int(lm.y * h)
                             cv2.circle(frame, (cx, cy), 3, (0, 255, 0), -1)
 
-                        # Draw line between thumb and index
                         x1, y1 = int(lm_index.x * w), int(lm_index.y * h)
                         x2, y2 = int(lm_thumb.x * w), int(lm_thumb.y * h)
                         cv2.line(frame, (x1, y1), (x2, y2), (255, 150, 50), 2)
                 except Exception as e:
-                    print(f"Tracking error: {e}")
+                    pass
 
                 display = frame.copy()
                 if index_coords: self.last_index = index_coords
@@ -235,6 +233,9 @@ class MainWindow(QMainWindow):
         self.video_label.setStyleSheet("background-color: black; border-radius:6px;")
         self.vbox.addWidget(self.video_label)
 
+        # <-- NEW: Get screen dimensions for pyautogui
+        self.screen_w, self.screen_h = pyautogui.size()
+
         self.video_thread = VideoThread()
         self.video_thread.frame_ready.connect(self.on_frame)
         self.video_thread.start()
@@ -275,6 +276,14 @@ class MainWindow(QMainWindow):
         self.virtual_x = self.virtual_x + (nx - self.virtual_x) * (1 - s)
         self.virtual_y = self.virtual_y + (ny - self.virtual_y) * (1 - s)
 
+        # <-- NEW: Move the actual Windows mouse cursor
+        try:
+            sys_x = int(self.virtual_x * self.screen_w)
+            sys_y = int(self.virtual_y * self.screen_h)
+            pyautogui.moveTo(sys_x, sys_y)
+        except Exception as e:
+            pass
+
         if th is not None:
             if math.hypot(nx - th[0], ny - th[1]) < self.video_thread.pinch_threshold:
                 now = time.time()
@@ -282,6 +291,12 @@ class MainWindow(QMainWindow):
                     self.virtual_click = True
                     self._click_viz_until = now + 0.22
                     self.last_click_time = now
+                    
+                    # <-- NEW: Perform the actual Windows mouse click
+                    try:
+                        pyautogui.click()
+                    except Exception as e:
+                        pass
 
         if self.virtual_click and time.time() > self._click_viz_until:
             self.virtual_click = False

@@ -2,6 +2,8 @@
 
 A computer vision application that turns your webcam into a touchless mouse. By utilizing the modern **MediaPipe Tasks API** for robust hand tracking and **PyAutoGUI** for system-level control, this app allows you to move your Windows cursor and click on items using simple hand gestures.
 
+Budget Tony Stark interface: aggressively pinch the air to click things on your screen.
+
 ## Features
 * **System-Wide Mouse Control**: Directly controls your actual operating system's mouse cursor.
 * **Touchless Gestures**: 

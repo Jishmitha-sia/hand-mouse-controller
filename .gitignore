@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+ENV/
+
+# VS Code
+.vscode/
+
+# Build and Distribution
+dist/
+build/
+*.spec
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Machine Learning Models
+*.task

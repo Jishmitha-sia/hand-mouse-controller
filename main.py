@@ -1,28 +1,31 @@
 import sys
 import time
 import math
-import threading
+import os
+import urllib.request
 
 import cv2
 import numpy as np
 import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QPointF
-from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter, QFont
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QPointF
+from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtWidgets import (
-    QApplication,
-    QLabel,
-    QVBoxLayout,
-    QWidget,
-    QHBoxLayout,
-    QMainWindow,
-    QSlider,
-    QGroupBox,
-    QFormLayout,
-    QPushButton,
+    QApplication, QLabel, QVBoxLayout, QWidget, QMainWindow
 )
 
-# -------- Video thread: capture and hand detection --------
+# -------- Auto-Download the MediaPipe Model --------
+MODEL_PATH = 'hand_landmarker.task'
+MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'
+
+if not os.path.exists(MODEL_PATH):
+    print("Downloading MediaPipe Hand Landmarker model...")
+    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    print("Download complete!")
+
+# -------- Video thread: capture and hand detection (Modern API) --------
 class VideoThread(QThread):
     frame_ready = pyqtSignal(np.ndarray)
 
@@ -30,22 +33,26 @@ class VideoThread(QThread):
         super().__init__(parent)
         self.running = False
         self.cap = None
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.4,
+        
+        # Initialize Modern MediaPipe Tasks API - Using VIDEO mode to prevent crashes
+        base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.VIDEO,  # Fixes the silent crash
+            num_hands=1,
+            min_hand_detection_confidence=0.5,
+            min_hand_presence_confidence=0.5,
+            min_tracking_confidence=0.4
         )
+        self.detector = vision.HandLandmarker.create_from_options(options)
+        
         self.last_click_time = 0
         self.smoothing = 0.5
         self.pinch_threshold = 0.05
         self.click_cooldown = 0.4
         self.last_index = None
         self.last_thumb = None
-        self._bad_frame_count = 0
-        self.process_every_n = 3 
-        self._frame_counter = 0
+        self.timestamp_ms = 0  # Required for VIDEO mode
 
     def run(self):
         self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
@@ -53,90 +60,64 @@ class VideoThread(QThread):
 
         try:
             while self.running:
+                ret, frame = self.cap.read()
+                if not ret:
+                    time.sleep(0.05)
+                    continue
+
+                frame = cv2.flip(frame, 1)  # mirror
+                h, w, _ = frame.shape
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Ensure memory is contiguous for MediaPipe C++ backend
+                rgb = np.ascontiguousarray(rgb)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+                index_coords = None
+                thumb_coords = None
+
                 try:
-                    ret, frame = self.cap.read()
-                    if not ret:
-                        self._bad_frame_count += 1
-                        if self._bad_frame_count > 30:
-                            try:
-                                self.cap.release()
-                            except Exception:
-                                pass
-                            time.sleep(0.2)
-                            try:
-                                self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-                            except Exception:
-                                pass
-                            self._bad_frame_count = 0
-                        time.sleep(0.05)
-                        continue
-                    else:
-                        self._bad_frame_count = 0
-
-                    frame = cv2.flip(frame, 1)  # mirror
-                    h, w, _ = frame.shape
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Video mode requires strictly increasing timestamps
+                    self.timestamp_ms += 33 
+                    detection_result = self.detector.detect_for_video(mp_image, self.timestamp_ms)
                     
-                    try:
-                        scale = 0.6
-                        small = cv2.resize(rgb, (0, 0), fx=scale, fy=scale)
-                    except Exception:
-                        small = rgb
-
-                    results = None
-                    try:
-                        if (self._frame_counter % max(1, self.process_every_n)) == 0:
-                            results = self.hands.process(small)
-                    except Exception as e:
-                        print(f"MediaPipe process error: {e}")
-                        results = None
-
-                    index_coords = None
-                    thumb_coords = None
-
-                    if results and results.multi_hand_landmarks:
-                        hand = results.multi_hand_landmarks[0]
-                        lm_index = hand.landmark[8]
-                        lm_thumb = hand.landmark[4]
+                    if detection_result.hand_landmarks:
+                        hand = detection_result.hand_landmarks[0]
+                        # Landmark 8 is Index tip, 4 is Thumb tip
+                        lm_index = hand[8]
+                        lm_thumb = hand[4]
 
                         index_coords = (lm_index.x, lm_index.y)
                         thumb_coords = (lm_thumb.x, lm_thumb.y)
 
-                        for lm in hand.landmark:
-                            try:
-                                cx, cy = int(lm.x * w), int(lm.y * h)
-                                cv2.circle(frame, (cx, cy), 3, (0, 255, 0), -1)
-                            except Exception:
-                                continue
+                        # Draw landmarks
+                        for lm in hand:
+                            cx, cy = int(lm.x * w), int(lm.y * h)
+                            cv2.circle(frame, (cx, cy), 3, (0, 255, 0), -1)
 
-                        try:
-                            x1, y1 = int(lm_index.x * w), int(lm_index.y * h)
-                            x2, y2 = int(lm_thumb.x * w), int(lm_thumb.y * h)
-                            cv2.line(frame, (x1, y1), (x2, y2), (255, 150, 50), 2)
-                        except Exception:
-                            pass
-
-                    display = frame.copy()
-                    self.last_index = index_coords
-                    self.last_thumb = thumb_coords
-                    self._frame_counter += 1
-                    self.frame_ready.emit(display)
-
+                        # Draw line between thumb and index
+                        x1, y1 = int(lm_index.x * w), int(lm_index.y * h)
+                        x2, y2 = int(lm_thumb.x * w), int(lm_thumb.y * h)
+                        cv2.line(frame, (x1, y1), (x2, y2), (255, 150, 50), 2)
                 except Exception as e:
-                    print(f"Frame loop error: {e}")
-                    time.sleep(0.05)
-                    continue
+                    print(f"Tracking error: {e}")
+
+                display = frame.copy()
+                if index_coords: self.last_index = index_coords
+                if thumb_coords: self.last_thumb = thumb_coords
+                
+                self.frame_ready.emit(display)
+
         finally:
             if self.cap:
-                try:
-                    self.cap.release()
-                except Exception:
-                    pass
+                self.cap.release()
 
     def stop(self):
         self.running = False
         self.wait()
 
+
+# -------- Main Window / UI --------
 class StylishWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -227,6 +208,7 @@ class StylishWidget(QWidget):
             painter.drawEllipse(acx - r // 2, acy - r // 2, r, r)
         painter.end()
 
+
 class MouseWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -237,6 +219,7 @@ class MouseWindow(QMainWindow):
         self.stylish = StylishWidget()
         self.stylish.setMinimumSize(360, 360)
         layout.addWidget(self.stylish)
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
